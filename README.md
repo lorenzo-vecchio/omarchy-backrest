@@ -33,11 +33,11 @@ The widget is placed in the right section of the bar. If needed:
 omarchy bar move io.github.lorenzo-vecchio.backrest --section right
 ```
 
-For local development:
+For local development, place this repository at
+`~/.config/omarchy/plugins/io.github.lorenzo-vecchio.backrest` with your usual
+git workflow, then load it:
 
 ```bash
-git clone https://github.com/lorenzo-vecchio/omarchy-backrest \
-  ~/.config/omarchy/plugins/io.github.lorenzo-vecchio.backrest
 omarchy-shell shell rescanPlugins
 omarchy plugin enable io.github.lorenzo-vecchio.backrest right
 ```
