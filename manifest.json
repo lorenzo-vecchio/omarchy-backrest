@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.lorenzo-vecchio.backrest",
+  "name": "Backrest",
+  "version": "0.1.0",
+  "author": "lorenzo-vecchio",
+  "license": "MIT",
+  "homepage": "https://github.com/lorenzo-vecchio/omarchy-backrest",
+  "description": "Backrest backup health, recent history, and one-click backups in the Omarchy bar.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Backrest",
+    "description": "See Backrest status at a glance, browse recent backups, and start a backup for any plan.",
+    "category": "System",
+    "defaultSection": "right",
+    "allowMultiple": false,
+    "defaults": {
+      "serverUrl": "http://127.0.0.1:9898",
+      "refreshIntervalSec": 30,
+      "showAge": true,
+      "authToken": "",
+      "username": "",
+      "password": ""
+    },
+    "schema": [
+      {
+        "key": "serverUrl",
+        "type": "string",
+        "label": "Backrest URL",
+        "defaultValue": "http://127.0.0.1:9898",
+        "description": "Base URL of the Backrest web UI, for example http://127.0.0.1:9898 or https://backup.example.com."
+      },
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 5,
+        "max": 3600,
+        "step": 5,
+        "defaultValue": 30,
+        "description": "How often status is polled. While a backup is running the widget polls every 5 seconds."
+      },
+      {
+        "key": "showAge",
+        "type": "boolean",
+        "label": "Show last backup age in the bar",
+        "defaultValue": true,
+        "description": "Show a compact age such as 2h next to the bar icon."
+      },
+      {
+        "key": "authToken",
+        "type": "string",
+        "label": "Bearer token (optional)",
+        "defaultValue": "",
+        "description": "JWT from a Backrest login. Preferred over username and password when authentication is enabled."
+      },
+      {
+        "key": "username",
+        "type": "string",
+        "label": "Username (optional)",
+        "defaultValue": "",
+        "description": "Used to log in only when no bearer token is set."
+      },
+      {
+        "key": "password",
+        "type": "string",
+        "label": "Password (optional)",
+        "defaultValue": "",
+        "description": "Stored in plain text in shell.json. Prefer a bearer token when possible."
+      }
+    ]
+  }
+}
