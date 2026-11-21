@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.lorenzo-vecchio.backrest",
   "name": "Backrest",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": "lorenzo-vecchio",
   "license": "MIT",
   "homepage": "https://github.com/lorenzo-vecchio/omarchy-backrest",
@@ -33,7 +33,7 @@
         "type": "string",
         "label": "Backrest URL",
         "defaultValue": "http://127.0.0.1:9898",
-        "description": "Base URL of the Backrest web UI, for example http://127.0.0.1:9898 or https://backup.example.com."
+        "description": "Base URL of the Backrest web UI. http is accepted only for localhost; a remote server must use https, for example https://backup.example.com."
       },
       {
         "key": "refreshIntervalSec",
@@ -57,7 +57,7 @@
         "type": "string",
         "label": "Bearer token (optional)",
         "defaultValue": "",
-        "description": "JWT from a Backrest login. Preferred over username and password when authentication is enabled."
+        "description": "JWT from a Backrest login. Preferred over username and password when authentication is enabled. Bound to the server URL it was entered for."
       },
       {
         "key": "username",

@@ -267,11 +267,24 @@ function runningOperations(operations) {
   return rows
 }
 
-function planRepos(config) {
+// Operations already carry both ids. Taking the newest operation per plan
+// gives the display labels without fetching GetConfig, whose response can
+// include repository passwords and storage environment values.
+function operationPlanRepos(operations) {
   var map = ({})
-  var plans = arr(obj(config).plans)
-  for (var i = 0; i < plans.length; i++) {
-    map[str(plans[i].id)] = str(plans[i].repo)
+  var latest = ({})
+  var list = arr(obj(operations).operations)
+  var limit = Math.min(list.length, 200)
+  for (var i = 0; i < limit; i++) {
+    var operation = list[i]
+    var planId = str(operation.planId)
+    var repoId = str(operation.repoId)
+    if (planId === "" || repoId === "") continue
+    var timestamp = num(operation.unixTimeStartMs)
+    if (!(planId in latest) || timestamp >= latest[planId]) {
+      map[planId] = repoId
+      latest[planId] = timestamp
+    }
   }
   return map
 }

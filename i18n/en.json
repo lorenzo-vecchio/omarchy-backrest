@@ -17,11 +17,14 @@
   "bar.error": "Backrest · last backup failed · %1",
   "bar.overdue": "Backrest · backup overdue · last backup %1",
 
-  "error.url": "Set a valid http(s) URL in the widget settings.",
+  "error.url": "Set a valid URL in the widget settings.",
+  "error.insecure": "Remote Backrest servers must use https. http is only allowed for localhost.",
   "error.network": "Cannot reach Backrest at %1.",
   "error.http": "Backrest returned HTTP %1.",
   "error.parse": "Backrest returned an unexpected response.",
+  "error.toolarge": "Backrest returned a response larger than 8 MB.",
   "error.auth": "Backrest requires authentication.",
+  "error.credentials": "Sign-in details belong to a different server. Re-enter them for %1.",
   "error.login": "Backrest login failed.",
   "error.backup": "Could not start the backup.",
 

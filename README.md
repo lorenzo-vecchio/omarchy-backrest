@@ -63,7 +63,7 @@ Use the widget settings in Omarchy, or edit the widget entry in `~/.config/omarc
 
 | Key | Default | Meaning |
 |-----|---------|---------|
-| `serverUrl` | `http://127.0.0.1:9898` | Base URL of the Backrest web UI. `http` and `https` only. |
+| `serverUrl` | `http://127.0.0.1:9898` | Base URL of the Backrest web UI. `http` is accepted only for localhost; remote servers must use `https`. |
 | `refreshIntervalSec` | `30` | Polling interval. While a backup is running the widget polls every 5 seconds. |
 | `showAge` | `true` | Show the last backup age next to the bar icon. |
 | `authToken` | empty | Bearer JWT. Preferred when Backrest authentication is enabled. |
@@ -73,6 +73,8 @@ Use the widget settings in Omarchy, or edit the widget entry in `~/.config/omarc
 ### Authentication
 
 With Backrest authentication enabled, set `authToken` to a JWT from a Backrest login. Alternatively set `username` and `password`; the widget calls `Authentication/Login` on first use and keeps the returned token in memory for the session.
+
+Credentials are bound to the server URL they were entered for. After changing `serverUrl`, re-enter the token or the username and password so they apply to the new server; the widget never offers the previous server's credentials to a different origin. A configured bearer token is also authoritative: if it is rejected, the widget does not fall back to the saved password.
 
 ## Controls
 
@@ -106,12 +108,11 @@ omarchy-shell io.github.lorenzo-vecchio.backrest backup local-daily
 The widget only reads from Backrest unless you press a backup button:
 
 - `GetSummaryDashboard` — plan and repository summaries, 30-day history.
-- `GetOperations` — detects a running backup and its progress.
-- `GetConfig` — instance name and plan-to-repository labels, cached for 30 minutes.
+- `GetOperations` — detects a running backup, its progress, and the plan-to-repository labels.
 - `Backup` — sent only when a plan's *Back up now* button is pressed.
 - `Authentication/Login` — sent only when username/password auth is configured.
 
-Requests use a fixed 10-second timeout, cap response parsing, and display every server-provided string as plain text. No downloaded content is executed.
+The widget deliberately does not call `GetConfig`: that response can contain repository passwords and storage environment values, while the display only needs plan and repository identifiers. Requests use a fixed 10-second timeout and curl aborts any response over 8 MiB before it reaches the shell. Every server-provided string is displayed as plain text and no downloaded content is executed.
 
 ## Notes
 

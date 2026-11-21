@@ -14,12 +14,26 @@ Item {
   property var settings: ({})
   property var bar: null
 
+  // Credentials are only ever used against the server they were entered for.
+  // Changing the URL leaves them bound to the old origin until one of them is
+  // edited again, so the previous server's token is never offered to the new
+  // one. The same binding covers session tokens and pending responses.
   readonly property string configuredToken: String(setting("authToken", "")).trim()
-  readonly property string username: String(setting("username", ""))
-  readonly property string password: String(setting("password", ""))
+  readonly property string configuredUsername: String(setting("username", ""))
+  readonly property string configuredPassword: String(setting("password", ""))
+  readonly property bool hasConfiguredCredentials: configuredToken !== ""
+    || (configuredUsername !== "" && configuredPassword !== "")
+  readonly property bool credentialsMatchServer: _credentialsBaseUrl === baseUrl
+  readonly property bool credentialsMismatch: hasConfiguredCredentials && !credentialsMatchServer
+  readonly property string username: credentialsMatchServer ? configuredUsername : ""
+  readonly property string password: credentialsMatchServer ? configuredPassword : ""
   readonly property string rawServerUrl: String(setting("serverUrl", "http://127.0.0.1:9898"))
   readonly property string baseUrl: normalizeUrl(rawServerUrl)
+  readonly property bool insecureUrl: isInsecureUrl(rawServerUrl)
+  readonly property string instance: baseUrl === "" ? "" : urlHost(baseUrl)
   readonly property int refreshIntervalSec: intSetting("refreshIntervalSec", 30, 5, 3600)
+  readonly property var curlCommand: ["/bin/sh", "-c",
+    "IFS= read -r line || exit 64; printf '%b' \"$line\" | exec curl -q --globoff -sS --config - -w '\\n%{http_code}'"]
 
   // --- observable status ---------------------------------------------------
 
@@ -28,7 +42,6 @@ Item {
   property string errorKind: ""
   property string errorCode: ""
   property string errorDetail: ""
-  property string instance: ""
   property var plans: []
   property var repos: []
   property var recent: []
@@ -113,7 +126,7 @@ Item {
   }
 
   readonly property string tooltip: {
-    if (baseUrl === "") return strings.t("error.url")
+    if (baseUrl === "") return insecureUrl ? strings.t("error.insecure") : strings.t("error.url")
     if (!online) return strings.t("bar.offline").arg(baseUrl)
     if (running.length > 0) {
       var job = running[0]
@@ -130,14 +143,16 @@ Item {
 
   readonly property string errorText: {
     if (errorKind === "") return ""
-    if (baseUrl === "") return strings.t("error.url")
+    if (baseUrl === "") return insecureUrl ? strings.t("error.insecure") : strings.t("error.url")
     if (errorKind === "http") {
       var suffix = errorDetail !== "" ? " " + errorDetail : ""
       return strings.t("error.http").arg(errorCode) + suffix
     }
     if (errorKind === "parse") return strings.t("error.parse")
     if (errorKind === "auth") return strings.t("error.auth")
+    if (errorKind === "credentials") return strings.t("error.credentials").arg(baseUrl)
     if (errorKind === "login") return strings.t("error.login")
+    if (errorKind === "toolarge") return strings.t("error.toolarge")
     return strings.t("error.network").arg(baseUrl)
   }
 
@@ -162,9 +177,41 @@ Item {
     return Math.max(minimum, Math.min(maximum, parsed))
   }
 
+  function urlHost(value) {
+    var match = /^https?:\/\/([^\/?#]+)/i.exec(String(value || ""))
+    if (!match) return ""
+    var authority = match[1]
+    var at = authority.lastIndexOf("@")
+    if (at !== -1) authority = authority.substring(at + 1)
+    if (authority.charAt(0) === "[") {
+      var end = authority.indexOf("]")
+      return end === -1 ? "" : authority.substring(1, end).toLowerCase()
+    }
+    return authority.replace(/:\d+$/, "").toLowerCase().replace(/\.$/, "")
+  }
+
+  function isLoopbackHost(host) {
+    if (host === "localhost" || host === "::1" || host === "0:0:0:0:0:0:0:1") return true
+    return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host)
+  }
+
+  function isInsecureUrl(value) {
+    var url = String(value || "").trim().replace(/\/+$/, "")
+    if (!/^http:\/\//i.test(url)) return false
+    var host = urlHost(url)
+    return host !== "" && !isLoopbackHost(host)
+  }
+
+  // http is only accepted for this machine. Anything remote must be https, so
+  // a password or a configuration response never crosses a plain connection.
   function normalizeUrl(value) {
     var url = String(value || "").trim().replace(/\/+$/, "")
     if (!/^https?:\/\/[^\s"'<>]+$/i.test(url)) return ""
+    var authority = /^https?:\/\/([^\/?#]*)/i.exec(url)
+    if (!authority || authority[1].indexOf("@") !== -1) return ""
+    var host = urlHost(url)
+    if (host === "") return ""
+    if (/^http:\/\//i.test(url) && !isLoopbackHost(host)) return ""
     return url
   }
 
@@ -207,17 +254,52 @@ Item {
   }
 
   function bearerToken() {
-    return configuredToken !== "" ? configuredToken : sessionToken
+    if (configuredToken !== "" && credentialsMatchServer) return configuredToken
+    if (sessionToken !== "" && sessionTokenServer === baseUrl) return sessionToken
+    return ""
   }
 
-  function apiArgs(path, body, tokenOverride) {
+  function curlQuote(value) {
+    return '"' + String(value)
+      .replace(/\\/g, "\\\\")
+      .replace(/"/g, '\\"')
+      .replace(/\r/g, "\\r")
+      .replace(/\n/g, "\\n")
+      .replace(/\t/g, "\\t") + '"'
+  }
+
+  // curl reads this whole request — URL, headers, credential and body — from
+  // stdin, so no secret ever appears in the process table. The command itself
+  // carries only the fixed script and a non-secret status format.
+  function apiConfig(path, body, tokenOverride) {
     var token = tokenOverride === undefined ? bearerToken() : tokenOverride
-    var args = ["curl", "-sS", "--max-time", "10", "-X", "POST",
-      "-H", "Content-Type: application/json"]
-    if (token !== "") args.push("-H", "Authorization: Bearer " + token)
-    args.push("-d", body, baseUrl + path)
-    args.push("-w", "\\n%{http_code}")
-    return args
+    var lines = [
+      "url = " + curlQuote(baseUrl + path),
+      'request = "POST"',
+      "header = " + curlQuote("Content-Type: application/json"),
+      "header = " + curlQuote("Accept: application/json")
+    ]
+    if (token !== "") lines.push("header = " + curlQuote("Authorization: Bearer " + token))
+    lines.push("data-binary = " + curlQuote(String(body || "{}")))
+    lines.push("connect-timeout = 10")
+    lines.push("max-time = 10")
+    // curl aborts the transfer at the ceiling, so the collector never buffers
+    // an unbounded response. 8 MiB is far above any dashboard this widget uses.
+    lines.push("max-filesize = 8388608")
+    lines.push("max-redirs = 0")
+    lines.push('proto = "=http,https"')
+    lines.push('proto-redir = "=http,https"')
+    return lines.join("\n") + "\n"
+  }
+
+  // Quickshell never closes a process's stdin, so the shell reads one line and
+  // decodes it itself. Backslashes are doubled and real newlines become \n;
+  // printf '%b' restores the config without waiting for EOF.
+  function encodeConfig(config) {
+    return String(config)
+      .replace(/\\/g, "\\\\")
+      .replace(/\r/g, "\\r")
+      .replace(/\n/g, "\\n")
   }
 
   function relativeAge(timestamp) {
@@ -301,39 +383,89 @@ Item {
   property bool _ready: false
   property bool _queued: false
   property bool _authTried: false
-  property string _dashboardRaw: ""
-  property string _operationsRaw: ""
-  property string _configRaw: ""
-  property string _backupRaw: ""
-  property string _loginRaw: ""
-  property double _configFetchedMs: 0
+  property string _credentialsBaseUrl: ""
+  property int _credentialEpoch: 0
+  property int _generation: 0
   property var _planRepos: ({})
   property string sessionToken: ""
+  property string sessionTokenServer: ""
   property string _backupPlan: ""
+  property string _loginServer: ""
+  property int _loginEpoch: -1
 
   readonly property int pollIntervalMs: (running.length > 0 || startingPlan !== "" || optimisticPlan !== "")
     ? 5000 : refreshIntervalSec * 1000
 
   onBaseUrlChanged: {
-    sessionToken = ""
-    _authTried = false
+    if (_credentialsBaseUrl === "") _credentialsBaseUrl = baseUrl
+    resetForServerChange()
     if (_ready) Qt.callLater(function() { root.refresh(true) })
   }
-  onConfiguredTokenChanged: {
+  onConfiguredTokenChanged: bindCredentials()
+  onConfiguredUsernameChanged: bindCredentials()
+  onConfiguredPasswordChanged: bindCredentials()
+
+  function bindCredentials() {
+    _credentialsBaseUrl = baseUrl
+    _credentialEpoch++
     sessionToken = ""
+    sessionTokenServer = ""
     _authTried = false
+    stopRequests(false)
     if (_ready) Qt.callLater(function() { root.refresh(true) })
   }
-  onUsernameChanged: if (_ready) { sessionToken = ""; _authTried = false }
-  onPasswordChanged: if (_ready) { sessionToken = ""; _authTried = false }
+
+  function stopRequests(includeBackup) {
+    _generation++
+    _queued = false
+    loading = false
+    if (dashboardProcess && dashboardProcess.running) dashboardProcess.running = false
+    if (operationsProcess && operationsProcess.running) operationsProcess.running = false
+    if (loginProcess && loginProcess.running) loginProcess.running = false
+    if (includeBackup && backupProcess && backupProcess.running) backupProcess.running = false
+  }
+
+  function resetForServerChange() {
+    stopRequests(true)
+    sessionToken = ""
+    sessionTokenServer = ""
+    _authTried = false
+    _planRepos = ({})
+    online = false
+    plans = []
+    repos = []
+    recent = []
+    history = []
+    historyMaxBytes = 0
+    running = []
+    startingPlan = ""
+    optimisticPlan = ""
+    _backupPlan = ""
+  }
+
+  function startRequest(process, path, body, tokenOverride) {
+    process.request = apiConfig(path, body, tokenOverride)
+    process.requestServer = baseUrl
+    process.requestGeneration = _generation
+    process.running = true
+  }
+
+  function finishLoading() {
+    loading = false
+    if (_queued) {
+      _queued = false
+      Qt.callLater(function() { root.refresh() })
+    }
+  }
 
   function refresh(manual) {
     if (!_ready) return
     if (baseUrl === "") {
       online = false
       loading = false
+      _queued = false
       running = []
-      errorKind = "url"
+      errorKind = insecureUrl ? "insecure" : "url"
       errorCode = ""
       errorDetail = ""
       return
@@ -348,59 +480,74 @@ Item {
       actionMessage = ""
     }
     loading = true
+    _queued = false
+    _generation++
     errorKind = ""
     errorCode = ""
     errorDetail = ""
-    _dashboardRaw = ""
-    dashboardProcess.command = apiArgs("/v1.Backrest/GetSummaryDashboard", "{}")
-    dashboardProcess.running = true
+    startRequest(dashboardProcess, "/v1.Backrest/GetSummaryDashboard", "{}")
   }
 
   function fetchOperations() {
     if (operationsProcess.running) {
-      loading = false
+      finishLoading()
       return
     }
-    _operationsRaw = ""
-    operationsProcess.command = apiArgs("/v1.Backrest/GetOperations",
+    startRequest(operationsProcess, "/v1.Backrest/GetOperations",
       JSON.stringify({ selector: {}, lastN: "80" }))
-    operationsProcess.running = true
   }
 
-  function fetchConfig() {
-    if (configProcess.running) return
-    _configRaw = ""
-    configProcess.command = apiArgs("/v1.Backrest/GetConfig", "{}")
-    configProcess.running = true
-  }
-
-  function handleDashboard(exitCode, raw) {
+  function handleDashboard(exitCode, raw, requestServer, requestGeneration) {
+    if (requestServer !== baseUrl || requestGeneration !== _generation) return
     var response = splitResponse(raw)
+    if (exitCode === 63) {
+      online = false
+      running = []
+      errorKind = "toolarge"
+      errorCode = ""
+      errorDetail = ""
+      finishLoading()
+      return
+    }
     var success = exitCode === 0 && response.status >= 200 && response.status < 300
     if (!success) {
-      if (isAuthFailure(response.status, response.body) && !_authTried && username !== "" && password !== "") {
-        _authTried = true
-        loading = false
-        login()
-        return
+      if (isAuthFailure(response.status, response.body)) {
+        if (credentialsMismatch) {
+          online = false
+          running = []
+          errorKind = "credentials"
+          errorCode = response.status > 0 ? String(response.status) : ""
+          errorDetail = ""
+          finishLoading()
+          return
+        }
+        // A configured bearer token is authoritative. It never falls back to
+        // the saved password; only a login request that started without a
+        // token may sign in with username/password.
+        if (!_authTried && configuredToken === "" && username !== "" && password !== "") {
+          _authTried = true
+          loading = false
+          login()
+          return
+        }
       }
       online = false
-      loading = false
       running = []
       errorKind = response.status > 0 ? "http" : "network"
       errorCode = response.status > 0 ? String(response.status) : ""
       errorDetail = apiMessage(response.body)
+      finishLoading()
       return
     }
 
     var parsed = parseJson(response.body)
     if (!parsed) {
       online = false
-      loading = false
       running = []
       errorKind = "parse"
       errorCode = ""
       errorDetail = ""
+      finishLoading()
       return
     }
 
@@ -420,21 +567,60 @@ Item {
     failed30 = Model.sumPlans(plans, "failed30")
     bytesAdded30 = Model.sumPlans(plans, "bytesAdded30")
     fetchOperations()
-    if (Date.now() - _configFetchedMs > 30 * 60 * 1000) fetchConfig()
   }
 
-  function handleOperations(exitCode, raw) {
+  function handleOperations(exitCode, raw, requestServer, requestGeneration) {
+    if (requestServer !== baseUrl || requestGeneration !== _generation) return
     var response = splitResponse(raw)
     if (exitCode === 0 && response.status >= 200 && response.status < 300) {
       var parsed = parseJson(response.body)
-      if (parsed) running = Model.runningOperations(parsed)
+      if (parsed) {
+        running = Model.runningOperations(parsed)
+        var mapping = Model.operationPlanRepos(parsed)
+        if (planRepoMapChanged(mapping)) {
+          _planRepos = mapping
+          applyPlanRepos()
+        }
+      }
     }
-    loading = false
+    finishLoading()
     settleOptimistic()
-    if (_queued) {
-      _queued = false
-      Qt.callLater(function() { root.refresh() })
+  }
+
+  // The operation feed already carries plan_id and repo_id, so the widget
+  // never needs to fetch GetConfig (which can contain repository passwords and
+  // storage environment values) just to label a plan.
+  function planRepoMapChanged(next) {
+    for (var key in next) {
+      if (_planRepos[key] !== next[key]) return true
     }
+    for (var oldKey in _planRepos) {
+      if (next[oldKey] === undefined) return true
+    }
+    return false
+  }
+
+  function applyPlanRepos() {
+    var updated = []
+    for (var i = 0; i < plans.length; i++) {
+      var plan = plans[i]
+      var repo = _planRepos[plan.id]
+      updated.push({
+        id: plan.id,
+        repo: repo !== undefined && repo !== "" ? repo : plan.repo,
+        nextBackupMs: plan.nextBackupMs,
+        success30: plan.success30,
+        warning30: plan.warning30,
+        failed30: plan.failed30,
+        bytesAdded30: plan.bytesAdded30,
+        bytesScanned30: plan.bytesScanned30,
+        protectedBytes: plan.protectedBytes,
+        recent: plan.recent,
+        last: plan.last,
+        history: plan.history
+      })
+    }
+    plans = updated
   }
 
   function settleOptimistic() {
@@ -445,97 +631,45 @@ Item {
     if (stillRunning || landed || Date.now() > optimisticUntil) optimisticPlan = ""
   }
 
-  function handleConfig(exitCode, raw) {
-    var response = splitResponse(raw)
-    if (exitCode !== 0 || response.status < 200 || response.status >= 300) return
-    var parsed = parseJson(response.body)
-    if (!parsed) return
-    instance = String(parsed.instance || "")
-    _planRepos = Model.planRepos(parsed)
-    _configFetchedMs = Date.now()
-    // Re-apply repo labels now that the plan -> repo mapping is known.
-    plans = Model.parsePlans({ planSummaries: planSummariesFromPlans(plans) }, _planRepos)
-  }
-
-  // Re-build plan objects after the config arrives without another dashboard
-  // request. `plans` already carries everything except the repo id.
-  function planSummariesFromPlans(source) {
-    var summaries = []
-    for (var i = 0; i < source.length; i++) {
-      var plan = source[i]
-      summaries.push({
-        id: plan.id,
-        nextBackupTimeMs: plan.nextBackupMs,
-        backupsSuccessLast30days: plan.success30,
-        backupsWarningLast30days: plan.warning30,
-        backupsFailedLast30days: plan.failed30,
-        bytesAddedLast30days: plan.bytesAdded30,
-        bytesScannedLast30days: plan.bytesScanned30,
-        protectedBytes: plan.protectedBytes,
-        recentBackups: recentBackupsFromPlan(plan),
-        historyLast30days: historyFromPlan(plan)
-      })
-    }
-    return summaries
-  }
-
-  function recentBackupsFromPlan(plan) {
-    var rows = { flowId: [], timestampMs: [], durationMs: [], status: [], bytesAdded: [] }
-    for (var i = 0; i < plan.recent.length; i++) {
-      var row = plan.recent[i]
-      rows.flowId.push(row.flowId)
-      rows.timestampMs.push(String(row.timestamp))
-      rows.durationMs.push(String(row.durationMs))
-      rows.status.push("STATUS_" + String(row.status).toUpperCase())
-      rows.bytesAdded.push(String(row.bytesAdded))
-    }
-    return rows
-  }
-
-  function historyFromPlan(plan) {
-    var rows = []
-    for (var i = 0; i < plan.history.length; i++) {
-      var day = plan.history[i]
-      var statusCounts = []
-      if (day.counts.success > 0) statusCounts.push({ count: String(day.counts.success), status: "STATUS_SUCCESS" })
-      if (day.counts.warning > 0) statusCounts.push({ count: String(day.counts.warning), status: "STATUS_WARNING" })
-      if (day.counts.error > 0) statusCounts.push({ count: String(day.counts.error), status: "STATUS_ERROR" })
-      rows.push({
-        timestampMs: String(day.timestamp),
-        bytesAdded: String(day.bytesAdded),
-        bytesScanned: String(day.bytesScanned),
-        statusCounts: statusCounts
-      })
-    }
-    return rows
-  }
-
   // --- actions -------------------------------------------------------------
 
   function login() {
     if (loginProcess.running) return
+    if (!credentialsMatchServer || username === "" || password === "") {
+      loading = false
+      errorKind = "auth"
+      return
+    }
     loading = true
     errorKind = ""
-    loginProcess.command = apiArgs("/v1.Authentication/Login",
+    _loginServer = baseUrl
+    _loginEpoch = _credentialEpoch
+    loginProcess.request = apiConfig("/v1.Authentication/Login",
       JSON.stringify({ username: username, password: password }), "")
+    loginProcess.requestServer = baseUrl
+    loginProcess.requestGeneration = _generation
     loginProcess.running = true
   }
 
-  function handleLogin(exitCode, raw) {
+  function handleLogin(exitCode, raw, requestServer, requestGeneration, requestEpoch) {
+    if (requestServer !== baseUrl || requestGeneration !== _generation) return
+    if (requestEpoch !== _credentialEpoch) return
     var response = splitResponse(raw)
     var parsed = parseJson(response.body)
     var token = parsed ? String(parsed.token || "") : ""
-    loading = false
     if (exitCode === 0 && response.status >= 200 && response.status < 300 && token !== "") {
       sessionToken = token
+      sessionTokenServer = baseUrl
       errorKind = ""
+      loading = false
       refresh()
       return
     }
     online = false
-    errorKind = "login"
+    errorKind = credentialsMismatch ? "credentials" : "login"
     errorCode = response.status > 0 ? String(response.status) : ""
     errorDetail = apiMessage(response.body)
+    finishLoading()
   }
 
   function startBackup(planId) {
@@ -546,12 +680,11 @@ Item {
     actionError = ""
     actionMessage = ""
     _backupPlan = id
-    _backupRaw = ""
-    backupProcess.command = apiArgs("/v1.Backrest/Backup", JSON.stringify({ value: id }))
-    backupProcess.running = true
+    startRequest(backupProcess, "/v1.Backrest/Backup", JSON.stringify({ value: id }))
   }
 
-  function handleBackup(exitCode, raw) {
+  function handleBackup(exitCode, raw, requestServer) {
+    if (requestServer !== baseUrl) return
     var response = splitResponse(raw)
     var plan = _backupPlan
     startingPlan = ""
@@ -574,52 +707,82 @@ Item {
 
   Process {
     id: dashboardProcess
-    command: []
+    command: root.curlCommand
+    stdinEnabled: true
+    property string request: ""
+    property string requestServer: ""
+    property int requestGeneration: 0
+    property string response: ""
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root._dashboardRaw = text
+      onStreamFinished: dashboardProcess.response = text
     }
-    onExited: function(exitCode) { root.handleDashboard(exitCode, root._dashboardRaw) }
+    onStarted: if (request !== "") { write(root.encodeConfig(request)); request = "" }
+    onExited: function(exitCode) {
+      var raw = response
+      response = ""
+      root.handleDashboard(exitCode, raw, requestServer, requestGeneration)
+    }
   }
 
   Process {
     id: operationsProcess
-    command: []
+    command: root.curlCommand
+    stdinEnabled: true
+    property string request: ""
+    property string requestServer: ""
+    property int requestGeneration: 0
+    property string response: ""
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root._operationsRaw = text
+      onStreamFinished: operationsProcess.response = text
     }
-    onExited: function(exitCode) { root.handleOperations(exitCode, root._operationsRaw) }
-  }
-
-  Process {
-    id: configProcess
-    command: []
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: root._configRaw = text
+    onStarted: if (request !== "") { write(root.encodeConfig(request)); request = "" }
+    onExited: function(exitCode) {
+      var raw = response
+      response = ""
+      root.handleOperations(exitCode, raw, requestServer, requestGeneration)
     }
-    onExited: function(exitCode) { root.handleConfig(exitCode, root._configRaw) }
   }
 
   Process {
     id: backupProcess
-    command: []
+    command: root.curlCommand
+    stdinEnabled: true
+    property string request: ""
+    property string requestServer: ""
+    property string response: ""
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root._backupRaw = text
+      onStreamFinished: backupProcess.response = text
     }
-    onExited: function(exitCode) { root.handleBackup(exitCode, root._backupRaw) }
+    onStarted: if (request !== "") { write(root.encodeConfig(request)); request = "" }
+    onExited: function(exitCode) {
+      var raw = response
+      response = ""
+      root.handleBackup(exitCode, raw, requestServer)
+    }
   }
 
   Process {
     id: loginProcess
-    command: []
+    command: root.curlCommand
+    stdinEnabled: true
+    property string request: ""
+    property string requestServer: ""
+    property int requestGeneration: 0
+    property int requestEpoch: -1
+    property string response: ""
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root._loginRaw = text
+      onStreamFinished: loginProcess.response = text
     }
-    onExited: function(exitCode) { root.handleLogin(exitCode, root._loginRaw) }
+    onStarted: if (request !== "") { write(root.encodeConfig(request)); request = "" }
+    onExited: function(exitCode) {
+      var raw = response
+      response = ""
+      root.handleLogin(exitCode, raw, requestServer, requestGeneration, requestEpoch)
+    }
   }
 
   Timer {
@@ -657,6 +820,7 @@ Item {
   }
 
   Component.onCompleted: {
+    if (_credentialsBaseUrl === "") _credentialsBaseUrl = baseUrl
     _ready = true
     nowMs = Date.now()
     refresh()
