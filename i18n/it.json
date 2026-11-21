@@ -24,9 +24,11 @@
   "error.parse": "Backrest ha restituito una risposta inattesa.",
   "error.toolarge": "Backrest ha restituito una risposta più grande di 8 MB.",
   "error.auth": "Backrest richiede l'autenticazione.",
-  "error.credentials": "Le credenziali appartengono a un altro server. Reinseriscile per %1.",
+  "error.credentials": "Le credenziali non sono confermate per %1. Confermale o reinseriscile.",
   "error.login": "Accesso a Backrest non riuscito.",
   "error.backup": "Impossibile avviare il backup.",
+
+  "credentials.confirm": "Usa per questo server",
 
   "action.started": "Backup avviato per %1.",
   "action.failed": "Impossibile avviare il backup: %1",

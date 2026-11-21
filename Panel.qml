@@ -242,16 +242,23 @@ Panel {
                   bordered: true
                   onClicked: if (root.service) root.service.refresh(true)
                 }
-                Text {
-                  anchors.verticalCenter: parent.verticalCenter
-                  textFormat: Text.PlainText
-                  text: strings.t("footer.settingsHint")
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.caption
-                  wrapMode: Text.WordWrap
-                  width: parent.width - parent.children[0].width - Style.space(8)
+                Button {
+                  visible: root.service && root.service.credentialsMismatch
+                  text: strings.t("credentials.confirm")
+                  foreground: root.barForeground
+                  bordered: true
+                  onClicked: if (root.service) root.service.confirmCredentials()
                 }
+              }
+
+              Text {
+                width: parent.width
+                textFormat: Text.PlainText
+                text: strings.t("footer.settingsHint")
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
               }
             }
           }

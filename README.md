@@ -74,7 +74,9 @@ Use the widget settings in Omarchy, or edit the widget entry in `~/.config/omarc
 
 With Backrest authentication enabled, set `authToken` to a JWT from a Backrest login. Alternatively set `username` and `password`; the widget calls `Authentication/Login` on first use and keeps the returned token in memory for the session.
 
-Each credential is bound to the server URL it was entered for, independently: editing the username never releases a retained token, and editing one login field never releases the other. The binding is remembered across widget and shell restarts in `~/.local/state/omarchy/backrest-credentials.json`, which stores only the server URL and a fingerprint per credential — never the token or password. After changing `serverUrl`, enter credentials for the new server; the widget never offers the previous server's token or password to a different origin. A bearer token that belongs to the current server is also authoritative: if it is rejected, the widget does not fall back to the saved password.
+Each credential is bound to the server URL it was entered for, independently: editing the username never releases a retained token, and editing one login field never releases the other. The binding is remembered across widget and shell restarts in `~/.local/state/omarchy/backrest-credentials.json`, which stores only the server URL and a fingerprint per credential — never the token or password.
+
+The binding fails closed. A credential is sent only when that file proves the origin it was entered for; if the file is missing, unreadable, or holds an outdated fingerprint, the widget sends no credential at all and asks you to confirm it for the current server (*Use for this server*) or to enter it again. A value changed in `shell.json` while the widget was stopped is therefore never assumed to belong to the URL in effect now. After changing `serverUrl`, confirm or re-enter credentials for the new server; the previous server's token or password is never offered to a different origin. A bearer token that belongs to the current server is also authoritative: if it is rejected, the widget does not fall back to the saved password.
 
 ## Controls
 
@@ -119,6 +121,18 @@ The widget deliberately does not call `GetConfig`: that response can contain rep
 - A running backup switches the status dot to a pulsing blue and opens a progress card with bytes processed when Backrest reports them.
 - If Backrest is unreachable, the panel keeps the last known snapshot visible and tells you it is stale.
 - The widget does not install, configure, or delete anything in Backrest.
+
+## Development
+
+`Service.qml` holds all Backrest traffic and the credential binding rules. The
+binding policy is exercised by `tests/credentials.test.js`, which extracts that
+policy from `Service.qml` and runs it through the startup, restart, URL-change
+and edit transitions:
+
+```bash
+node tests/credentials.test.js
+/usr/lib/qt6/bin/qmllint Service.qml Panel.qml
+```
 
 ## License
 

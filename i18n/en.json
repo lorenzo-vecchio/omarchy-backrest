@@ -24,9 +24,11 @@
   "error.parse": "Backrest returned an unexpected response.",
   "error.toolarge": "Backrest returned a response larger than 8 MB.",
   "error.auth": "Backrest requires authentication.",
-  "error.credentials": "Sign-in details belong to a different server. Re-enter them for %1.",
+  "error.credentials": "Sign-in details are not confirmed for %1. Confirm or re-enter them.",
   "error.login": "Backrest login failed.",
   "error.backup": "Could not start the backup.",
+
+  "credentials.confirm": "Use for this server",
 
   "action.started": "Backup started for %1.",
   "action.failed": "Could not start the backup: %1",

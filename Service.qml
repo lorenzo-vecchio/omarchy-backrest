@@ -403,6 +403,13 @@ Item {
   property string sessionTokenServer: ""
   property string _backupPlan: ""
   property int _loginEpoch: -1
+  // name -> { server, fingerprint } for the origins we can prove. Kept in
+  // memory so a save never has to trust a partially written state file.
+  property var _credentialFields: ({})
+  // False until the host hands the widget its settings once. The first
+  // delivery is a load; every later change is a user edit.
+  property bool _settingsSeen: false
+  property var _observedCredentials: ({ token: "", username: "", password: "" })
 
   readonly property int pollIntervalMs: (running.length > 0 || startingPlan !== "" || optimisticPlan !== "")
     ? 5000 : refreshIntervalSec * 1000
@@ -411,19 +418,31 @@ Item {
     resetForServerChange()
     if (_ready) Qt.callLater(function() { root.refresh(true) })
   }
-  onConfiguredTokenChanged: noteCredentialEdit("token")
-  onConfiguredUsernameChanged: noteCredentialEdit("username")
-  onConfiguredPasswordChanged: noteCredentialEdit("password")
+  // Omarchy injects the whole settings object (see Bar.qml injectProps). A
+  // URL and its credentials therefore change together in one assignment, and
+  // that assignment is the only reliable edit signal: the widget's individual
+  // credential properties can also change while settings are being delivered.
+  onSettingsChanged: handleSettingsChange()
 
-  // The binding is stored per field so each value keeps the origin it was
-  // entered for. Only the server and an md5 fingerprint of the value are
-  // written; the token and password themselves never reach the state file.
-  // A value seen before keeps its stored origin after a restart; a value that
-  // was never seen belongs to the URL in effect when it is edited.
+  // --- credential binding policy -------------------------------------------
+  // A credential is used only when there is positive evidence of the origin
+  // it was entered for: a stored binding whose fingerprint matches the value
+  // in settings. Without that evidence it is never sent anywhere; the panel
+  // asks the user to confirm it for the current server instead. A value the
+  // user edits while the widget is running is evidence for the URL in effect
+  // at that moment. Only an origin and a fingerprint are persisted, never the
+  // secret itself.
+
   function credentialValue(name) {
     if (name === "token") return configuredToken
     if (name === "username") return configuredUsername
     return configuredPassword
+  }
+
+  function credentialSnapshot() {
+    return ({ token: credentialValue("token"),
+      username: credentialValue("username"),
+      password: credentialValue("password") })
   }
 
   function credentialServer(name) {
@@ -438,82 +457,145 @@ Item {
     else _passwordServer = server
   }
 
-  function storedCredentialState() {
-    var stored = parseJson(credentialsFile.text())
-    if (!stored) return ({ known: false, fields: null, legacyServer: "" })
-    if (stored.version === 2 && stored.fields && typeof stored.fields === "object")
-      return ({ known: true, fields: stored.fields, legacyServer: "" })
-    if (typeof stored.fingerprint === "string" || typeof stored.server === "string")
-      return ({ known: true, fields: null,
-        legacyServer: typeof stored.server === "string" ? stored.server : "" })
-    return ({ known: false, fields: null, legacyServer: "" })
+  // The pre-v2 state bound the three fields as one unit with a single
+  // fingerprint, so it proves an origin only while all three still match.
+  function legacyFingerprint() {
+    if (configuredToken === "" && configuredUsername === "" && configuredPassword === "")
+      return ""
+    return Qt.md5(JSON.stringify([configuredToken, configuredUsername, configuredPassword]))
   }
 
-  // Rebinds one field only, so editing the username or password cannot release
-  // a retained token (or the reverse) to a server it was not entered for.
-  function applyCredentialBinding(name) {
+  function storedCredentialState() {
+    var stored = parseJson(credentialsFile.text())
+    if (!stored) return ({ fields: null, legacyServer: "", legacyFingerprint: "" })
+    if (stored.version === 2 && stored.fields && typeof stored.fields === "object")
+      return ({ fields: stored.fields, legacyServer: "", legacyFingerprint: "" })
+    if (typeof stored.fingerprint === "string" || typeof stored.server === "string")
+      return ({ fields: null,
+        legacyServer: typeof stored.server === "string" ? stored.server : "",
+        legacyFingerprint: typeof stored.fingerprint === "string" ? stored.fingerprint : "" })
+    return ({ fields: null, legacyServer: "", legacyFingerprint: "" })
+  }
+
+  // The proven origin of one value, or "" when the state holds no matching
+  // proof. A missing, unreadable or mismatching file always answers "".
+  function boundServer(name) {
     var value = credentialValue(name)
-    if (value === "") {
+    if (value === "") return ""
+    var entry = _credentialFields[name]
+    if (!entry || typeof entry !== "object") return ""
+    if (String(entry.fingerprint || "") !== Qt.md5(value)) return ""
+    return typeof entry.server === "string" ? entry.server : ""
+  }
+
+  function restoreCredentialServers() {
+    setCredentialServer("token", boundServer("token"))
+    setCredentialServer("username", boundServer("username"))
+    setCredentialServer("password", boundServer("password"))
+  }
+
+  // Binds one edited value to the URL in effect right now. Only the origin and
+  // a fingerprint are recorded; the value itself never reaches the state file.
+  function bindCredentialToCurrentServer(name) {
+    var value = credentialValue(name)
+    if (value === "" || baseUrl === "") {
       setCredentialServer(name, "")
+      delete _credentialFields[name]
       return
     }
-    var state = storedCredentialState()
-    if (!state.known) {
-      setCredentialServer(name, baseUrl)
-      return
-    }
-    if (state.fields === null) {
-      // Pre-v2 files bound the whole credential to a single server; keep that
-      // origin until the value is edited under the per-field format.
-      setCredentialServer(name, state.legacyServer)
-      return
-    }
-    var entry = state.fields[name]
-    if (entry && String(entry.fingerprint || "") === Qt.md5(value))
-      setCredentialServer(name, typeof entry.server === "string" ? entry.server : "")
-    else
-      setCredentialServer(name, baseUrl)
+    setCredentialServer(name, baseUrl)
+    _credentialFields[name] = { server: baseUrl, fingerprint: Qt.md5(value) }
   }
 
   function loadCredentialBinding() {
-    applyCredentialBinding("token")
-    applyCredentialBinding("username")
-    applyCredentialBinding("password")
+    var state = storedCredentialState()
+    var migrated = false
+    _credentialFields = ({})
+    if (state.fields !== null) {
+      for (var key in state.fields) {
+        if (key === "token" || key === "username" || key === "password")
+          _credentialFields[key] = state.fields[key]
+      }
+    } else if (state.legacyServer !== ""
+               && state.legacyFingerprint !== ""
+               && state.legacyFingerprint === legacyFingerprint()) {
+      // Migrate the single v1 binding only when its fingerprint still covers
+      // every value in settings. A value changed while the widget was stopped
+      // has no known origin, so nothing is migrated and nothing is usable.
+      var names = ["token", "username", "password"]
+      for (var i = 0; i < names.length; i++) {
+        if (credentialValue(names[i]) !== "")
+          _credentialFields[names[i]] = {
+            server: state.legacyServer,
+            fingerprint: Qt.md5(credentialValue(names[i]))
+          }
+      }
+      migrated = true
+    }
+    restoreCredentialServers()
+    _observedCredentials = credentialSnapshot()
+    _settingsSeen = credentialValue("token") !== "" || credentialValue("username") !== ""
+      || credentialValue("password") !== ""
     _credentialsLoaded = true
-    // Persist the origin of values present at startup (including a migration
-    // from the pre-v2 single binding) so a later URL change cannot rebind them
-    // after a restart. When settings arrive after startup, the edit handler
-    // writes them instead.
-    if (configuredToken !== "" || configuredUsername !== "" || configuredPassword !== "")
-      saveCredentialBinding()
+    if (migrated) saveCredentialBinding()
   }
 
-  function saveCredentialBinding(clearedName) {
-    // Merge instead of rewriting: settings can arrive one field at a time, and
-    // a save before every field has been applied must not drop the origin of a
-    // value it has not seen yet. A field the user cleared is dropped explicitly.
-    var state = storedCredentialState()
+  function saveCredentialBinding() {
+    // Never write a secret, and never write an entry for a value that no
+    // longer matches it. Entries for a value that is currently empty stay in
+    // memory: the settings may not have been delivered yet, and the recorded
+    // origin is harmless while there is no value to send. Clearing a field
+    // explicitly removes its entry in bindCredentialToCurrentServer.
     var fields = ({})
-    if (state.fields !== null) {
-      for (var key in state.fields) fields[key] = state.fields[key]
-    }
     var names = ["token", "username", "password"]
     for (var i = 0; i < names.length; i++) {
       var name = names[i]
       var value = credentialValue(name)
-      var server = credentialServer(name)
-      if (value === "" || server === "") continue
-      fields[name] = { server: server, fingerprint: Qt.md5(value) }
+      if (value === "") continue
+      var entry = _credentialFields[name]
+      if (entry && typeof entry === "object"
+          && String(entry.fingerprint || "") === Qt.md5(value)
+          && typeof entry.server === "string" && entry.server !== "")
+        fields[name] = { server: entry.server, fingerprint: entry.fingerprint }
     }
-    if (clearedName === "token" || clearedName === "username" || clearedName === "password")
-      delete fields[clearedName]
-    if (Object.keys(fields).length === 0) return
     credentialsFile.setText(JSON.stringify({ version: 2, fields: fields }) + "\n")
   }
 
-  function noteCredentialEdit(name) {
+  // The names whose value differs from the last observed settings delivery.
+  function changedCredentials(snapshot, observed) {
+    var names = ["token", "username", "password"]
+    var changed = []
+    for (var i = 0; i < names.length; i++) {
+      if (snapshot[names[i]] !== observed[names[i]]) changed.push(names[i])
+    }
+    return changed
+  }
+
+  // The first settings delivery is a load, not an edit: its values come from
+  // the saved configuration, so only a stored binding may make them usable.
+  // A change after that is the user editing the settings for the URL in effect
+  // now, so exactly the changed values are bound to it.
+  function applyCredentialSnapshot(changedNames, firstDelivery) {
+    if (firstDelivery) {
+      // A load never writes: there is nothing new to persist, and a file that
+      // already proves an origin must be left exactly as it is.
+      restoreCredentialServers()
+      return
+    }
+    for (var i = 0; i < changedNames.length; i++)
+      bindCredentialToCurrentServer(changedNames[i])
+    saveCredentialBinding()
+  }
+  // --- end credential binding policy ---------------------------------------
+
+  function handleSettingsChange() {
     if (!_credentialsLoaded) return
-    var value = credentialValue(name)
+    var snapshot = credentialSnapshot()
+    var changed = changedCredentials(snapshot, root._observedCredentials)
+    var firstDelivery = !_settingsSeen
+    _settingsSeen = true
+    _observedCredentials = snapshot
+    if (changed.length === 0) return
     _credentialEpoch++
     sessionToken = ""
     sessionTokenServer = ""
@@ -521,16 +603,31 @@ Item {
     stopRequests(false)
     // Defer so a settings save that changes URL and credential together binds
     // the new value to the URL the user just saved, not the previous one.
-    // Omarchy also injects settings right after startup: a value that was
-    // already bound keeps its stored origin instead of the URL now in settings.
     Qt.callLater(function() {
-      if (root.credentialValue(name) !== value) return
-      root.applyCredentialBinding("token")
-      root.applyCredentialBinding("username")
-      root.applyCredentialBinding("password")
-      root.saveCredentialBinding(value === "" ? name : "")
+      if (root.credentialValue("token") !== snapshot.token
+          || root.credentialValue("username") !== snapshot.username
+          || root.credentialValue("password") !== snapshot.password) return
+      root.applyCredentialSnapshot(changed, firstDelivery)
       if (root._ready) root.refresh(true)
     })
+  }
+
+  // Explicit user confirmation, offered by the panel when configured settings
+  // have no proven origin (for example after the state file is removed). The
+  // user says these values belong to the server shown now, which is the proof
+  // a load alone can never provide.
+  function confirmCredentials() {
+    if (baseUrl === "") return
+    var names = ["token", "username", "password"]
+    for (var i = 0; i < names.length; i++)
+      bindCredentialToCurrentServer(names[i])
+    saveCredentialBinding()
+    _credentialEpoch++
+    sessionToken = ""
+    sessionTokenServer = ""
+    _authTried = false
+    stopRequests(false)
+    refresh(true)
   }
 
   function stopRequests(includeBackup) {
