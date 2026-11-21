@@ -74,7 +74,7 @@ Use the widget settings in Omarchy, or edit the widget entry in `~/.config/omarc
 
 With Backrest authentication enabled, set `authToken` to a JWT from a Backrest login. Alternatively set `username` and `password`; the widget calls `Authentication/Login` on first use and keeps the returned token in memory for the session.
 
-Credentials are bound to the server URL they were entered for. The binding is remembered across widget and shell restarts in `~/.local/state/omarchy/backrest-credentials.json`, which stores only the server URL and a fingerprint of the credentials — never the token or password. After changing `serverUrl`, re-enter the token or the username and password so they apply to the new server; the widget never offers the previous server's credentials to a different origin. A configured bearer token is also authoritative: if it is rejected, the widget does not fall back to the saved password.
+Each credential is bound to the server URL it was entered for, independently: editing the username never releases a retained token, and editing one login field never releases the other. The binding is remembered across widget and shell restarts in `~/.local/state/omarchy/backrest-credentials.json`, which stores only the server URL and a fingerprint per credential — never the token or password. After changing `serverUrl`, enter credentials for the new server; the widget never offers the previous server's token or password to a different origin. A bearer token that belongs to the current server is also authoritative: if it is rejected, the widget does not fall back to the saved password.
 
 ## Controls
 

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.lorenzo-vecchio.backrest",
   "name": "Backrest",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "author": "lorenzo-vecchio",
   "license": "MIT",
   "homepage": "https://github.com/lorenzo-vecchio/omarchy-backrest",
@@ -64,7 +64,7 @@
         "type": "string",
         "label": "Username (optional)",
         "defaultValue": "",
-        "description": "Used to log in only when no bearer token is set."
+        "description": "Used to log in only when no bearer token for this server is set. Bound to the server URL it was entered for."
       },
       {
         "key": "password",

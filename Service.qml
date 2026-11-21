@@ -14,19 +14,24 @@ Item {
   property var settings: ({})
   property var bar: null
 
-  // Credentials are only ever used against the server they were entered for.
-  // Changing the URL leaves them bound to the old origin until one of them is
-  // edited again, so the previous server's token is never offered to the new
-  // one. The same binding covers session tokens and pending responses.
+  // Every credential is only ever used against the server it was entered for.
+  // Changing the URL leaves each one bound to its old origin until that specific
+  // value is edited again, so editing the username or password never releases a
+  // retained token (or the reverse) to a different origin. The same binding
+  // covers session tokens and pending responses.
   readonly property string configuredToken: String(setting("authToken", "")).trim()
   readonly property string configuredUsername: String(setting("username", ""))
   readonly property string configuredPassword: String(setting("password", ""))
   readonly property bool hasConfiguredCredentials: configuredToken !== ""
     || (configuredUsername !== "" && configuredPassword !== "")
-  readonly property bool credentialsMatchServer: _credentialsBaseUrl === baseUrl
-  readonly property bool credentialsMismatch: hasConfiguredCredentials && !credentialsMatchServer
-  readonly property string username: credentialsMatchServer ? configuredUsername : ""
-  readonly property string password: credentialsMatchServer ? configuredPassword : ""
+  readonly property bool tokenUsable: configuredToken !== "" && _tokenServer === baseUrl
+  readonly property string username: configuredUsername !== "" && _usernameServer === baseUrl
+    ? configuredUsername : ""
+  readonly property string password: configuredPassword !== "" && _passwordServer === baseUrl
+    ? configuredPassword : ""
+  readonly property bool hasUsableCredentials: tokenUsable
+    || (username !== "" && password !== "")
+  readonly property bool credentialsMismatch: hasConfiguredCredentials && !hasUsableCredentials
   readonly property string rawServerUrl: String(setting("serverUrl", "http://127.0.0.1:9898"))
   readonly property string baseUrl: normalizeUrl(rawServerUrl)
   readonly property bool insecureUrl: isInsecureUrl(rawServerUrl)
@@ -257,7 +262,7 @@ Item {
   }
 
   function bearerToken() {
-    if (configuredToken !== "" && credentialsMatchServer) return configuredToken
+    if (tokenUsable) return configuredToken
     if (sessionToken !== "" && sessionTokenServer === baseUrl) return sessionToken
     return ""
   }
@@ -387,8 +392,9 @@ Item {
   property bool _ready: false
   property bool _queued: false
   property bool _authTried: false
-  property string _credentialsBaseUrl: ""
-  property string _credentialsFingerprint: ""
+  property string _tokenServer: ""
+  property string _usernameServer: ""
+  property string _passwordServer: ""
   property bool _credentialsLoaded: false
   property int _credentialEpoch: 0
   property int _generation: 0
@@ -405,71 +411,124 @@ Item {
     resetForServerChange()
     if (_ready) Qt.callLater(function() { root.refresh(true) })
   }
-  onConfiguredTokenChanged: noteCredentialEdit()
-  onConfiguredUsernameChanged: noteCredentialEdit()
-  onConfiguredPasswordChanged: noteCredentialEdit()
+  onConfiguredTokenChanged: noteCredentialEdit("token")
+  onConfiguredUsernameChanged: noteCredentialEdit("username")
+  onConfiguredPasswordChanged: noteCredentialEdit("password")
 
-  // A fingerprint of the current credential lets the binding be restored after
-  // a restart. If the credential changed while the widget was not running, the
-  // stored fingerprint no longer matches and the new values are bound to the
-  // URL in effect now; if it did not change, the stored URL still governs.
-  function credentialFingerprint() {
-    if (configuredToken === "" && configuredUsername === "" && configuredPassword === "")
-      return ""
-    return Qt.md5(JSON.stringify([configuredToken, configuredUsername, configuredPassword]))
+  // The binding is stored per field so each value keeps the origin it was
+  // entered for. Only the server and an md5 fingerprint of the value are
+  // written; the token and password themselves never reach the state file.
+  // A value seen before keeps its stored origin after a restart; a value that
+  // was never seen belongs to the URL in effect when it is edited.
+  function credentialValue(name) {
+    if (name === "token") return configuredToken
+    if (name === "username") return configuredUsername
+    return configuredPassword
   }
 
-  // The URL a fingerprint was bound to, or "" when this exact credential has
-  // never been seen before.
-  function storedCredentialServer(fingerprint) {
-    if (fingerprint === "") return ""
+  function credentialServer(name) {
+    if (name === "token") return _tokenServer
+    if (name === "username") return _usernameServer
+    return _passwordServer
+  }
+
+  function setCredentialServer(name, server) {
+    if (name === "token") _tokenServer = server
+    else if (name === "username") _usernameServer = server
+    else _passwordServer = server
+  }
+
+  function storedCredentialState() {
     var stored = parseJson(credentialsFile.text())
-    if (!stored || String(stored.fingerprint || "") !== fingerprint) return ""
-    return typeof stored.server === "string" ? stored.server : ""
+    if (!stored) return ({ known: false, fields: null, legacyServer: "" })
+    if (stored.version === 2 && stored.fields && typeof stored.fields === "object")
+      return ({ known: true, fields: stored.fields, legacyServer: "" })
+    if (typeof stored.fingerprint === "string" || typeof stored.server === "string")
+      return ({ known: true, fields: null,
+        legacyServer: typeof stored.server === "string" ? stored.server : "" })
+    return ({ known: false, fields: null, legacyServer: "" })
   }
 
-  // Returns true when the current credential was already bound to a server.
-  function applyCredentialBinding() {
-    var fingerprint = credentialFingerprint()
-    var stored = storedCredentialServer(fingerprint)
-    _credentialsBaseUrl = stored !== "" ? stored : baseUrl
-    _credentialsFingerprint = fingerprint
-    return stored !== ""
+  // Rebinds one field only, so editing the username or password cannot release
+  // a retained token (or the reverse) to a server it was not entered for.
+  function applyCredentialBinding(name) {
+    var value = credentialValue(name)
+    if (value === "") {
+      setCredentialServer(name, "")
+      return
+    }
+    var state = storedCredentialState()
+    if (!state.known) {
+      setCredentialServer(name, baseUrl)
+      return
+    }
+    if (state.fields === null) {
+      // Pre-v2 files bound the whole credential to a single server; keep that
+      // origin until the value is edited under the per-field format.
+      setCredentialServer(name, state.legacyServer)
+      return
+    }
+    var entry = state.fields[name]
+    if (entry && String(entry.fingerprint || "") === Qt.md5(value))
+      setCredentialServer(name, typeof entry.server === "string" ? entry.server : "")
+    else
+      setCredentialServer(name, baseUrl)
   }
 
   function loadCredentialBinding() {
-    applyCredentialBinding()
+    applyCredentialBinding("token")
+    applyCredentialBinding("username")
+    applyCredentialBinding("password")
     _credentialsLoaded = true
+    // Persist the origin of values present at startup (including a migration
+    // from the pre-v2 single binding) so a later URL change cannot rebind them
+    // after a restart. When settings arrive after startup, the edit handler
+    // writes them instead.
+    if (configuredToken !== "" || configuredUsername !== "" || configuredPassword !== "")
+      saveCredentialBinding()
   }
 
-  function saveCredentialBinding() {
-    var fingerprint = credentialFingerprint()
-    if (fingerprint === "") return
-    credentialsFile.setText(JSON.stringify({
-      server: baseUrl,
-      fingerprint: fingerprint
-    }) + "\n")
+  function saveCredentialBinding(clearedName) {
+    // Merge instead of rewriting: settings can arrive one field at a time, and
+    // a save before every field has been applied must not drop the origin of a
+    // value it has not seen yet. A field the user cleared is dropped explicitly.
+    var state = storedCredentialState()
+    var fields = ({})
+    if (state.fields !== null) {
+      for (var key in state.fields) fields[key] = state.fields[key]
+    }
+    var names = ["token", "username", "password"]
+    for (var i = 0; i < names.length; i++) {
+      var name = names[i]
+      var value = credentialValue(name)
+      var server = credentialServer(name)
+      if (value === "" || server === "") continue
+      fields[name] = { server: server, fingerprint: Qt.md5(value) }
+    }
+    if (clearedName === "token" || clearedName === "username" || clearedName === "password")
+      delete fields[clearedName]
+    if (Object.keys(fields).length === 0) return
+    credentialsFile.setText(JSON.stringify({ version: 2, fields: fields }) + "\n")
   }
 
-  function noteCredentialEdit() {
+  function noteCredentialEdit(name) {
     if (!_credentialsLoaded) return
-    var fingerprint = credentialFingerprint()
-    if (fingerprint === _credentialsFingerprint) return
-    _credentialsFingerprint = fingerprint
+    var value = credentialValue(name)
     _credentialEpoch++
     sessionToken = ""
     sessionTokenServer = ""
     _authTried = false
     stopRequests(false)
     // Defer so a settings save that changes URL and credential together binds
-    // the new credential to the URL the user just saved, not the previous one.
-    // Omarchy also injects settings right after startup: if the credential is
-    // the same one from last run, the stored server is kept instead of being
-    // overwritten with the URL now in settings.
+    // the new value to the URL the user just saved, not the previous one.
+    // Omarchy also injects settings right after startup: a value that was
+    // already bound keeps its stored origin instead of the URL now in settings.
     Qt.callLater(function() {
-      if (root.credentialFingerprint() !== fingerprint) return
-      var alreadyBound = root.applyCredentialBinding()
-      if (!alreadyBound) root.saveCredentialBinding()
+      if (root.credentialValue(name) !== value) return
+      root.applyCredentialBinding("token")
+      root.applyCredentialBinding("username")
+      root.applyCredentialBinding("password")
+      root.saveCredentialBinding(value === "" ? name : "")
       if (root._ready) root.refresh(true)
     })
   }
@@ -580,10 +639,10 @@ Item {
           finishLoading()
           return
         }
-        // A configured bearer token is authoritative. It never falls back to
-        // the saved password; only a login request that started without a
-        // token may sign in with username/password.
-        if (!_authTried && configuredToken === "" && username !== "" && password !== "") {
+        // A bearer token that belongs to this server is authoritative. It never
+        // falls back to the saved password; only a login request without a
+        // usable token for this origin may sign in with username/password.
+        if (!_authTried && !tokenUsable && username !== "" && password !== "") {
           _authTried = true
           loading = false
           login()
@@ -694,9 +753,9 @@ Item {
 
   function login() {
     if (loginProcess.running) return
-    if (!credentialsMatchServer || username === "" || password === "") {
+    if (username === "" || password === "") {
       loading = false
-      errorKind = "auth"
+      errorKind = credentialsMismatch ? "credentials" : "auth"
       return
     }
     loading = true
