@@ -31,6 +31,9 @@ Item {
   readonly property string baseUrl: normalizeUrl(rawServerUrl)
   readonly property bool insecureUrl: isInsecureUrl(rawServerUrl)
   readonly property string instance: baseUrl === "" ? "" : urlHost(baseUrl)
+  readonly property string credentialStatePath:
+    (Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") || "") + "/.local/state")
+      + "/omarchy/backrest-credentials.json"
   readonly property int refreshIntervalSec: intSetting("refreshIntervalSec", 30, 5, 3600)
   readonly property var curlCommand: ["/bin/sh", "-c",
     "IFS= read -r line || exit 64; printf '%b' \"$line\" | exec curl -q --globoff -sS --config - -w '\\n%{http_code}'"]
@@ -294,12 +297,13 @@ Item {
 
   // Quickshell never closes a process's stdin, so the shell reads one line and
   // decodes it itself. Backslashes are doubled and real newlines become \n;
-  // printf '%b' restores the config without waiting for EOF.
+  // printf '%b' restores the config without waiting for EOF. The trailing
+  // newline is what terminates read's line, so it must always be present.
   function encodeConfig(config) {
     return String(config)
       .replace(/\\/g, "\\\\")
       .replace(/\r/g, "\\r")
-      .replace(/\n/g, "\\n")
+      .replace(/\n/g, "\\n") + "\n"
   }
 
   function relativeAge(timestamp) {
@@ -384,35 +388,90 @@ Item {
   property bool _queued: false
   property bool _authTried: false
   property string _credentialsBaseUrl: ""
+  property string _credentialsFingerprint: ""
+  property bool _credentialsLoaded: false
   property int _credentialEpoch: 0
   property int _generation: 0
   property var _planRepos: ({})
   property string sessionToken: ""
   property string sessionTokenServer: ""
   property string _backupPlan: ""
-  property string _loginServer: ""
   property int _loginEpoch: -1
 
   readonly property int pollIntervalMs: (running.length > 0 || startingPlan !== "" || optimisticPlan !== "")
     ? 5000 : refreshIntervalSec * 1000
 
   onBaseUrlChanged: {
-    if (_credentialsBaseUrl === "") _credentialsBaseUrl = baseUrl
     resetForServerChange()
     if (_ready) Qt.callLater(function() { root.refresh(true) })
   }
-  onConfiguredTokenChanged: bindCredentials()
-  onConfiguredUsernameChanged: bindCredentials()
-  onConfiguredPasswordChanged: bindCredentials()
+  onConfiguredTokenChanged: noteCredentialEdit()
+  onConfiguredUsernameChanged: noteCredentialEdit()
+  onConfiguredPasswordChanged: noteCredentialEdit()
 
-  function bindCredentials() {
-    _credentialsBaseUrl = baseUrl
+  // A fingerprint of the current credential lets the binding be restored after
+  // a restart. If the credential changed while the widget was not running, the
+  // stored fingerprint no longer matches and the new values are bound to the
+  // URL in effect now; if it did not change, the stored URL still governs.
+  function credentialFingerprint() {
+    if (configuredToken === "" && configuredUsername === "" && configuredPassword === "")
+      return ""
+    return Qt.md5(JSON.stringify([configuredToken, configuredUsername, configuredPassword]))
+  }
+
+  // The URL a fingerprint was bound to, or "" when this exact credential has
+  // never been seen before.
+  function storedCredentialServer(fingerprint) {
+    if (fingerprint === "") return ""
+    var stored = parseJson(credentialsFile.text())
+    if (!stored || String(stored.fingerprint || "") !== fingerprint) return ""
+    return typeof stored.server === "string" ? stored.server : ""
+  }
+
+  // Returns true when the current credential was already bound to a server.
+  function applyCredentialBinding() {
+    var fingerprint = credentialFingerprint()
+    var stored = storedCredentialServer(fingerprint)
+    _credentialsBaseUrl = stored !== "" ? stored : baseUrl
+    _credentialsFingerprint = fingerprint
+    return stored !== ""
+  }
+
+  function loadCredentialBinding() {
+    applyCredentialBinding()
+    _credentialsLoaded = true
+  }
+
+  function saveCredentialBinding() {
+    var fingerprint = credentialFingerprint()
+    if (fingerprint === "") return
+    credentialsFile.setText(JSON.stringify({
+      server: baseUrl,
+      fingerprint: fingerprint
+    }) + "\n")
+  }
+
+  function noteCredentialEdit() {
+    if (!_credentialsLoaded) return
+    var fingerprint = credentialFingerprint()
+    if (fingerprint === _credentialsFingerprint) return
+    _credentialsFingerprint = fingerprint
     _credentialEpoch++
     sessionToken = ""
     sessionTokenServer = ""
     _authTried = false
     stopRequests(false)
-    if (_ready) Qt.callLater(function() { root.refresh(true) })
+    // Defer so a settings save that changes URL and credential together binds
+    // the new credential to the URL the user just saved, not the previous one.
+    // Omarchy also injects settings right after startup: if the credential is
+    // the same one from last run, the stored server is kept instead of being
+    // overwritten with the URL now in settings.
+    Qt.callLater(function() {
+      if (root.credentialFingerprint() !== fingerprint) return
+      var alreadyBound = root.applyCredentialBinding()
+      if (!alreadyBound) root.saveCredentialBinding()
+      if (root._ready) root.refresh(true)
+    })
   }
 
   function stopRequests(includeBackup) {
@@ -642,12 +701,12 @@ Item {
     }
     loading = true
     errorKind = ""
-    _loginServer = baseUrl
     _loginEpoch = _credentialEpoch
     loginProcess.request = apiConfig("/v1.Authentication/Login",
       JSON.stringify({ username: username, password: password }), "")
     loginProcess.requestServer = baseUrl
     loginProcess.requestGeneration = _generation
+    loginProcess.requestEpoch = _loginEpoch
     loginProcess.running = true
   }
 
@@ -704,6 +763,16 @@ Item {
   }
 
   // --- processes -----------------------------------------------------------
+
+  // Which server the credentials in settings were entered for. Only the
+  // origin and a credential fingerprint are stored, never the secret itself.
+  FileView {
+    id: credentialsFile
+    path: root.credentialStatePath
+    blockLoading: true
+    atomicWrites: true
+    printErrors: false
+  }
 
   Process {
     id: dashboardProcess
@@ -820,7 +889,7 @@ Item {
   }
 
   Component.onCompleted: {
-    if (_credentialsBaseUrl === "") _credentialsBaseUrl = baseUrl
+    loadCredentialBinding()
     _ready = true
     nowMs = Date.now()
     refresh()
